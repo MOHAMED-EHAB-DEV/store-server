@@ -39,3 +39,15 @@ The server uses the same `.env` from the parent directory:
 - `new-message` - New message received
 - `user-typing` - User typing status
 - `ticket-status-changed` - Ticket was updated
+
+## Docker
+
+### Build
+```bash
+docker build -t my-store-server .
+```
+
+### Run
+```bash
+docker run -p 3001:3001 -e JWT_SECRET="your-secret" my-store-server
+```
