@@ -16,7 +16,7 @@ RUN npm install
 COPY . .
 
 # Expose the port the app runs on
-EXPOSE 3001
+EXPOSE 7860
 
 # Define environment variables with default values (can be overridden at runtime)
 # ENV SOCKET_PORT=3001
