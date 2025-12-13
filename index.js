@@ -2,24 +2,20 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-import jwt from "jsonwebtoken";
+
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
-// Load .env from parent directory
+// Standard dotenv config (looks for .env in current dir, but we will use Platform Secrets)
+dotenv.config();
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-dotenv.config({ path: join(__dirname, ".env") });
 
-const PORT = process.env.SOCKET_PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET;
+const PORT = process.env.PORT || 3001;
+
 const CORS_ORIGIN = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-
-if (!JWT_SECRET) {
-    console.error("JWT_SECRET is required");
-    process.exit(1);
-}
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
@@ -35,11 +31,14 @@ const io = new Server(httpServer, {
     }
 });
 
-// Store active connections
-const activeUsers = new Map(); // userId -> socketId
-const ticketRooms = new Map(); // ticketId -> Set of socketIds
+const activeUsers = new Map();
+const ticketRooms = new Map();
 
-// Active users endpoint
+app.get("/api/active-users", (req, res) => {
+    const onlineUsers = Array.from(activeUsers.keys());
+    res.json({ users: onlineUsers });
+});
+
 app.get("/api/active-users/:ticketId", (req, res) => {
     const { ticketId } = req.params;
     const room = io.sockets.adapter.rooms.get(`ticket:${ticketId}`);
@@ -67,10 +66,13 @@ app.post("/api/send-notification", (req, res) => {
         return res.status(400).json({ error: "Missing recipientId or notification" });
     }
 
-    const socketId = activeUsers.get(recipientId);
-    if (socketId) {
-        io.to(socketId).emit("new-notification", notification);
-        console.log(`Notification sent to user ${recipientId}`);
+    const userSockets = activeUsers.get(recipientId);
+    if (userSockets && userSockets.size > 0) {
+        // Emit to all sockets for this user
+        for (const socketId of userSockets) {
+            io.to(socketId).emit("new-notification", notification);
+        }
+        console.log(`Notification sent to user ${recipientId} on ${userSockets.size} devices`);
         return res.json({ success: true, delivered: true });
     }
 
@@ -79,35 +81,34 @@ app.post("/api/send-notification", (req, res) => {
 });
 
 // Authentication middleware
+// Authentication middleware
 io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
+    const { userId, role } = socket.handshake.auth;
 
-    if (!token) {
-        return next(new Error("Authentication required"));
+    if (!userId) {
+        console.log("Connection rejected: No userId provided");
+        return next(new Error("Authentication required: userId missing"));
     }
 
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        if (typeof decoded === "string" || !decoded.id) {
-            return next(new Error("Invalid token"));
-        }
-
-        socket.data.userId = decoded.id;
-        socket.data.role = decoded.role || "user";
-        next();
-    } catch (error) {
-        next(new Error("Invalid token"));
-    }
+    socket.data.userId = userId;
+    socket.data.role = role || "user";
+    next();
 });
 
 io.on("connection", (socket) => {
     const userId = socket.data.userId;
     const userRole = socket.data.role;
 
-    console.log(`User connected: ${userId} (${userRole})`);
-
     // Store user connection
-    activeUsers.set(userId, socket.id);
+    if (!activeUsers.has(userId)) {
+        activeUsers.set(userId, new Set());
+        // First connection for this user - broadcast ONLINE
+        io.emit("user-online", { userId });
+        console.log(`User online: ${userId}`);
+    }
+    activeUsers.get(userId).add(socket.id);
+
+    console.log(`User connected: ${userId} (${userRole}) - Socket ID: ${socket.id}`);
 
     // Join ticket room
     socket.on("join-ticket", (ticketId) => {
@@ -170,7 +171,18 @@ io.on("connection", (socket) => {
 
     // Disconnect
     socket.on("disconnect", () => {
-        activeUsers.delete(userId);
+        // Remove this socket for the user
+        if (activeUsers.has(userId)) {
+            const userSockets = activeUsers.get(userId);
+            userSockets.delete(socket.id);
+
+            // If no more connections, user is OFFLINE
+            if (userSockets.size === 0) {
+                activeUsers.delete(userId);
+                io.emit("user-offline", { userId });
+                console.log(`User offline: ${userId}`);
+            }
+        }
 
         // Remove from all ticket rooms
         for (const [ticketId, sockets] of ticketRooms.entries()) {
@@ -180,7 +192,7 @@ io.on("connection", (socket) => {
             }
         }
 
-        console.log(`User disconnected: ${userId}`);
+        console.log(`Socket disconnected: ${socket.id} (User: ${userId})`);
     });
 });
 
